@@ -1,0 +1,19 @@
+{
+  "name": "academia-super-treino-online",
+  "version": "4.3.0",
+  "private": true,
+  "type": "module",
+  "description": "Academia Super Treino V4.3 - gestao e seguranca",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:local": "wrangler d1 execute super-treino-prod --local --file=./schema.sql",
+    "migrate:local": "wrangler d1 migrations apply super-treino-prod --local",
+    "migrate:remote": "wrangler d1 migrations apply super-treino-prod --remote",
+    "backup:remote": "wrangler d1 export super-treino-prod --remote --output=backup-super-treino.sql",
+    "test": "node --experimental-sqlite --test tests/*.test.js"
+  },
+  "devDependencies": {
+    "wrangler": "^4.137.0"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "academia-super-treino",
+  "main": "./src/index.js",
+  "compatibility_date": "2026-09-08",
+  "workers_dev": true,
+  "assets": {
+    "directory": "./public"
+  },
+  "observability": {
+    "enabled": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "super-treino-prod",
+      "database_id": "52aeb7e0-1883-4719-84fb-9e8901e98fab"
+    }
+  ]
+}

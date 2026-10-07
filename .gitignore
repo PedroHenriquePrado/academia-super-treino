@@ -1,0 +1,16 @@
+node_modules/
+.wrangler/
+.dev.vars
+.dev.vars.*
+.env
+.env.*
+backup*.sql
+backup*.json
+backups/
+restauracao-local/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.zip
+*.rar
