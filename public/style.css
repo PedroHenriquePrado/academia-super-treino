@@ -392,3 +392,5 @@
 .exercise-youtube-link:hover{border-color:var(--green);background:var(--green-soft)}.exercise-youtube-link:focus-visible{outline:2px solid var(--green);outline-offset:2px}
 .exercise-youtube-hint{display:block;color:var(--muted);font-size:11px;margin:7px 0 0;line-height:1.5}
 .focus-primary .exercise-youtube-link{margin-top:15px}.portal-exercise-body>.exercise-youtube-link{margin-top:11px}
+
+.student-delete-shortcut{margin:18px 0;padding:20px;max-width:850px}.student-delete-shortcut h3{margin:0}.student-delete-shortcut .btn{margin-top:5px}.archived-delete-link{display:block;margin-top:7px;color:var(--red)!important}

@@ -171,7 +171,7 @@
           headline.textContent=matches.length===1?'Possível aluno já cadastrado':'Possíveis alunos já cadastrados';
           duplicateNotice.appendChild(headline);
           const desc=document.createElement('p');
-          desc.textContent='Confira antes de salvar. Familiares podem compartilhar telefone; este aviso não bloqueia o cadastro.';
+          desc.textContent='Confira antes de salvar. A comparação usa o nome completo; este aviso não bloqueia o cadastro.';
           duplicateNotice.appendChild(desc);
           for(const item of matches){
             const link=document.createElement('a');

@@ -104,7 +104,7 @@ async function duplicateForm(env,cookie,keepId,removeId) {
   return {html,fields:{keep_id:String(keepId),delete_id:String(removeId),fingerprint:fingerprint[1],csrf_token:token[1],reason:'Cadastro duplicado confirmado',ack_finance:'1',confirm_text:`EXCLUIR ${removeId}`}};
 }
 
-test('duplicados lists normalized phone and name matches, including archived students, without automatically deleting anyone',async()=>{
+test('shared WhatsApp alone is not a duplicate; equal normalized names still appear for review',async()=>{
  const {env,db}=await fixture();
  const cookie=await login(env);
  const phoneCopy=addDuplicate(db,1);
@@ -115,11 +115,13 @@ test('duplicados lists normalized phone and name matches, including archived stu
  const page=await req(env,'/alunos/duplicados',{cookie});
  const html=await page.text();
  assert.match(html,/Possíveis alunos duplicados/);
- assert.match(html,/Mesmo telefone/);
  assert.match(html,/Mesmo nome/);
- assert.match(html,new RegExp(`manter=1&amp;excluir=${phoneCopy}|manter=1&excluir=${phoneCopy}`));
+ assert.doesNotMatch(html,new RegExp(`manter=1&amp;excluir=${phoneCopy}|manter=1&excluir=${phoneCopy}`));
  assert.match(html,new RegExp(`manter=2&amp;excluir=${nameCopy}|manter=2&excluir=${nameCopy}`));
  assert.equal(db.prepare('SELECT COUNT(*) c FROM students').get().c,57);
+ assert.equal((await req(env,`/alunos/duplicados/comparar?manter=1&excluir=${phoneCopy}`,{cookie})).status,404);
+ const lookup=await req(env,'/api/alunos/verificar-duplicidade?name=Pessoa%20Nova&phone=11999900001',{cookie});
+ assert.deepEqual((await lookup.json()).matches,[]);
  const unrelated=await req(env,'/alunos/duplicados/comparar?manter=1&excluir=3',{cookie});
  assert.equal(unrelated.status,404);
 });
@@ -203,6 +205,47 @@ test('an error during the final deletion rolls back invoices and student data to
  assert.equal(db.prepare('SELECT COUNT(*) c FROM students WHERE id=?').get(duplicate).c,1);
  assert.equal(db.prepare("SELECT COUNT(*) c FROM invoices WHERE receipt_number='ROLLBACK-REC'").get().c,1);
  assert.equal(db.prepare("SELECT COUNT(*) c FROM audit_log WHERE action='aluno_duplicado_excluido'").get().c,0);
+});
+
+test('archived student can be definitively deleted from archived list after reviewing paid receipts',async()=>{
+ const {env,db}=await fixture();const cookie=await login(env);
+ db.prepare("UPDATE students SET status='archived' WHERE id=1").run();
+ const list=await req(env,'/alunos?status=archived',{cookie});
+ assert.match(await list.text(),/href="\/alunos\/1\/exclusao-definitiva"/);
+ const detail=await req(env,'/alunos/1',{cookie});
+ assert.match(await detail.text(),/Conferir exclusão definitiva/);
+ const form=await req(env,'/alunos/1/exclusao-definitiva',{cookie});
+ assert.equal(form.status,200);
+ const html=await form.text();
+ assert.match(html,/ST-TESTE-1/);
+ const fingerprint=html.match(/name="fingerprint" value="([a-f0-9]{64})"/)[1];
+ const csrfToken=html.match(/name="csrf_token" value="([a-f0-9]+)"/)[1];
+ const fields={fingerprint,csrf_token:csrfToken,ack_finance:'1',reason:'Cadastro indevido',confirm_text:'EXCLUIR 1'};
+ assert.equal((await req(env,'/alunos/1/exclusao-definitiva',{method:'POST',cookie,form:{...fields,csrf_token:''}})).status,403);
+ assert.equal((await req(env,'/alunos/1/exclusao-definitiva',{method:'POST',cookie,form:{...fields,confirm_text:'EXCLUIR 2'}})).status,400);
+ const done=await req(env,'/alunos/1/exclusao-definitiva',{method:'POST',cookie,form:fields});
+ assert.equal(done.status,302);
+ assert.match(done.headers.get('location'),/^\/alunos\?status=archived/);
+ assert.equal(db.prepare('SELECT COUNT(*) c FROM students WHERE id=1').get().c,0);
+ assert.equal(db.prepare('SELECT COUNT(*) c FROM invoices WHERE student_id=1').get().c,0);
+ assert.equal(db.prepare("SELECT COUNT(*) c FROM audit_log WHERE action='aluno_excluido_definitivamente' AND entity_id=1").get().c,1);
+ assert.equal(db.prepare('PRAGMA foreign_key_check').all().length,0);
+});
+
+test('editing an active student links to confirmation and stale invoice data blocks deletion',async()=>{
+ const {env,db}=await fixture();const cookie=await login(env);
+ assert.match(await (await req(env,'/alunos/30/editar',{cookie})).text(),/href="\/alunos\/30\/exclusao-definitiva"/);
+ const html=await (await req(env,'/alunos/30/exclusao-definitiva',{cookie})).text();
+ const fingerprint=html.match(/name="fingerprint" value="([a-f0-9]{64})"/)[1];
+ const csrfToken=html.match(/name="csrf_token" value="([a-f0-9]+)"/)[1];
+ const fields={fingerprint,csrf_token:csrfToken,ack_finance:'1',reason:'Cadastro de teste',confirm_text:'EXCLUIR 30'};
+ db.prepare('UPDATE invoices SET amount=95 WHERE student_id=30').run();
+ assert.equal((await req(env,'/alunos/30/exclusao-definitiva',{method:'POST',cookie,form:fields})).status,409);
+ assert.equal(db.prepare('SELECT COUNT(*) c FROM students WHERE id=30').get().c,1);
+ const freshHtml=await (await req(env,'/alunos/30/exclusao-definitiva',{cookie})).text();
+ fields.fingerprint=freshHtml.match(/name="fingerprint" value="([a-f0-9]{64})"/)[1];
+ assert.equal((await req(env,'/alunos/30/exclusao-definitiva',{method:'POST',cookie,form:fields})).status,302);
+ assert.equal(db.prepare('SELECT COUNT(*) c FROM students WHERE id=30').get().c,0);
 });
 
 test('migration on existing 55 students preserves all old invoices and paid receipts', async()=>{

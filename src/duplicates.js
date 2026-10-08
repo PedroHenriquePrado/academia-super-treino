@@ -1,4 +1,4 @@
-// Sugestões para revisão humana. Telefone compartilhado ou nome igual não provam identidade.
+// Sugestões para revisão humana. O telefone compartilhado não identifica um aluno.
 export function normalizedPhone(value) {
   return String(value || '').replace(/\D/g, '').replace(/^55(?=\d{10,11}$)/, '');
 }
@@ -11,23 +11,20 @@ export function normalizedName(value) {
 export function duplicateReasons(a, b) {
   const phoneA = normalizedPhone(a.phone), phoneB = normalizedPhone(b.phone);
   const nameA = normalizedName(a.name), nameB = normalizedName(b.name);
-  const reasons = [];
-  if (phoneA.length >= 10 && phoneA === phoneB) reasons.push('Mesmo telefone');
-  if (nameA.length >= 5 && nameA === nameB) reasons.push('Mesmo nome');
-  return reasons;
+  if (nameA.length < 5 || nameA !== nameB) return [];
+  return phoneA.length >= 10 && phoneA === phoneB ? ['Mesmo nome', 'Mesmo telefone'] : ['Mesmo nome'];
 }
 
 export function duplicatePairs(students) {
-  const byPhone = new Map(), byName = new Map(), pairs = new Map();
+  const byName = new Map(), pairs = new Map();
   for (const student of students) {
-    for (const [map, key] of [[byPhone, normalizedPhone(student.phone)], [byName, normalizedName(student.name)]]) {
-      if (key.length < (map === byPhone ? 10 : 5)) continue;
-      for (const previous of map.get(key) || []) {
-        const pair = [previous, student].sort((a, b) => Number(a.id) - Number(b.id));
-        pairs.set(`${pair[0].id}:${pair[1].id}`, pair);
-      }
-      map.set(key, [...(map.get(key) || []), student]);
+    const key = normalizedName(student.name);
+    if (key.length < 5) continue;
+    for (const previous of byName.get(key) || []) {
+      const pair = [previous, student].sort((a, b) => Number(a.id) - Number(b.id));
+      pairs.set(`${pair[0].id}:${pair[1].id}`, pair);
     }
+    byName.set(key, [...(byName.get(key) || []), student]);
   }
   return [...pairs.values()].map(([a, b]) => ({ a, b, reasons: duplicateReasons(a, b) }))
     .sort((x, y) => y.reasons.length - x.reasons.length || Number(x.a.id) - Number(y.a.id) || Number(x.b.id) - Number(y.b.id));
