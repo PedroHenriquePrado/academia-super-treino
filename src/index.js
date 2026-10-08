@@ -1,4 +1,5 @@
 import {exerciseLibrary,exerciseGuide,exercisePresentation} from './exercises.js';
+import {duplicatePairs,duplicateReasons,invoiceMovePlan} from './duplicates.js';
 const TZ = 'America/Sao_Paulo';
 const SESSION_HOURS = 12;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
@@ -309,9 +310,42 @@ function flashFrom(url) {
   if (!msg) return '';
   return `<div class="toast success-toast">✓ ${htmlEscape(msg)}</div>`;
 }
+
+async function duplicateReview(env, keepId, removeId) {
+  if (!Number.isSafeInteger(keepId) || !Number.isSafeInteger(removeId) || keepId < 1 || removeId < 1 || keepId === removeId) return null;
+  const keep = await dbGet(env.DB, 'SELECT id,name,phone,status,birth_date,start_date,monthly_value,due_day,created_at,updated_at FROM students WHERE id=?', keepId);
+  const remove = await dbGet(env.DB, 'SELECT id,name,phone,status,birth_date,start_date,monthly_value,due_day,created_at,updated_at FROM students WHERE id=?', removeId);
+  if (!keep || !remove) return null;
+  const reasons = duplicateReasons(keep, remove);
+  if (!reasons.length) return null;
+  const invoices = await dbAll(env.DB, `SELECT id,student_id,reference_month,due_date,amount,status,paid_at,payment_method,receipt_number,created_at
+    FROM invoices WHERE student_id IN (?,?) ORDER BY reference_month DESC,id DESC`, keepId, removeId);
+  const keepInvoices = invoices.filter(i => Number(i.student_id) === keepId);
+  const removeInvoices = invoices.filter(i => Number(i.student_id) === removeId);
+  const activity = await dbAll(env.DB, `SELECT s.id,
+    (SELECT COUNT(*) FROM student_workouts WHERE student_id=s.id) workouts,
+    (SELECT COUNT(*) FROM student_exercise_checks WHERE student_id=s.id) checks,
+    (SELECT COUNT(*) FROM student_exercise_sets WHERE student_id=s.id) sets_count,
+    (SELECT COUNT(*) FROM student_workout_daily WHERE student_id=s.id) days,
+    (SELECT COUNT(*) FROM student_portal_accounts WHERE student_id=s.id) has_access
+    FROM students s WHERE s.id IN (?,?)`, keepId, removeId);
+  const plan = invoiceMovePlan(keepInvoices, removeInvoices);
+  const fingerprint = await sha256Hex(JSON.stringify({keep,remove,invoices,activity}));
+  return {keep,remove,reasons,keepInvoices,removeInvoices,activity,plan,fingerprint};
+}
+
+function duplicateInvoiceList(invoices) {
+  return `<div class="duplicate-invoice-list">${invoices.map(i => `<div class="duplicate-invoice"><span><strong>${htmlEscape(referenceLabel(i.reference_month))}</strong><small>${badge(invoiceStatus(i))} ${i.status === 'paid' ? `Recebido em ${brDate(i.paid_at)} · recibo ${htmlEscape(i.receipt_number || '—')}` : `Vence em ${brDate(i.due_date)}`}</small></span><strong>${money(i.amount)}</strong></div>`).join('') || '<p class="empty mini">Sem mensalidades neste cadastro.</p>'}</div>`;
+}
+
+function duplicateStudentCard(s, invoices, activity, heading) {
+  const paid = invoices.filter(i => i.status === 'paid');
+  const paidTotal = paid.reduce((sum, i) => sum + Number(i.amount), 0);
+  return `<section class="panel duplicate-card"><span class="eyebrow">${heading} · CADASTRO #${s.id}</span><h2>${htmlEscape(s.name)}</h2><p>${htmlEscape(s.phone)} · ${badge(s.status === 'archived' ? 'Arquivado' : s.status === 'active' ? 'Ativo' : 'Inativo')}</p><p>Início: ${brDate(s.start_date)} · nascimento: ${brDate(s.birth_date)} · dia ${s.due_day}</p><p><strong>${invoices.length} mensalidade(s) · ${paid.length} paga(s) · ${money(paidTotal)} recebidos</strong></p><p>${Number(activity?.workouts || 0)} fichas · ${Number(activity?.checks || 0) + Number(activity?.sets_count || 0) + Number(activity?.days || 0)} registros de treino · ${Number(activity?.has_access || 0) ? 'acesso ao app' : 'sem acesso ao app'}</p><a href="/alunos/${s.id}" target="_blank" rel="noopener">Abrir ficha completa ↗</a>${duplicateInvoiceList(invoices)}</section>`;
+}
 function nav(active = '', g, csrfToken = '') {
   const items = [
-    ['dashboard', '/', 'Dashboard', '⌂'], ['students', '/alunos', 'Alunos', '👥'], ['invoices', '/mensalidades', 'Mensalidades', '💳'],
+    ['dashboard', '/', 'Dashboard', '⌂'], ['students', '/alunos', 'Alunos', '👥'], ['duplicates', '/alunos/duplicados', 'Duplicados', '▣'], ['invoices', '/mensalidades', 'Mensalidades', '💳'],
     ['workouts', '/treinos', 'Treinos', '🏋️'], ['leads', '/leads', 'Futuros clientes', '🎯'], ['whatsapp', '/whatsapp', 'WhatsApp', '◉'],
     ['reports', '/relatorios', 'Relatórios', '▥'], ['backup', '/backup', 'Backup', '↧'], ['settings', '/configuracoes', 'Configurações', '⚙'], ['security', '/seguranca', 'Usuários e segurança', '🔐']
   ];
@@ -325,7 +359,7 @@ function layout(title, content, active = '', user = null, actions = '', g = { gy
   const themeBeforePaint = `<script>(function(){try{var choice=localStorage.getItem('super-treino-theme');var dark=choice==='dark'||(choice!=='light'&&window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches);document.documentElement.setAttribute('data-theme',dark?'dark':'light');}catch(e){document.documentElement.setAttribute('data-theme',window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');}})();</script>`;
   const csrfInput = user?.csrf_token ? `<input type="hidden" name="csrf_token" value="${attr(user.csrf_token)}">` : '';
   const protectedContent = csrfInput ? content.replace(/<form\b[^>]*>/gi, form => /\bmethod\s*=\s*[\"']?post\b/i.test(form) ? `${form}${csrfInput}` : form) : content;
-  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#111827"><title>${htmlEscape(title)} · ${htmlEscape(g.gym_name)}</title>${themeBeforePaint}<link rel="stylesheet" href="/style.css?v=190"></head><body>${user ? nav(active, g, user.csrf_token) : themeToggle}<main class="${user ? 'app' : ''}">${user ? `<header class="topbar"><div class="topbar-left"><button class="menu-btn" type="button" aria-label="Menu" onclick="document.body.classList.toggle('menu-open')">☰</button><div><h1>${htmlEscape(title)}</h1><p>${htmlEscape(dateText)}</p></div></div><div class="top-actions">${actions}${themeToggle}<div class="user-pill"><span class="avatar">${htmlEscape(initials(user.name).slice(0, 1))}</span><div><strong>${htmlEscape(user.name)}</strong><small>${user.must_change_password ? 'Trocar senha' : 'Administrador'}</small></div></div></div></header>` : ''}<section class="content">${protectedContent}</section></main><script src="/app.js?v=190"></script></body></html>`;
+  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#111827"><title>${htmlEscape(title)} · ${htmlEscape(g.gym_name)}</title>${themeBeforePaint}<link rel="stylesheet" href="/style.css?v=191"></head><body>${user ? nav(active, g, user.csrf_token) : themeToggle}<main class="${user ? 'app' : ''}">${user ? `<header class="topbar"><div class="topbar-left"><button class="menu-btn" type="button" aria-label="Menu" onclick="document.body.classList.toggle('menu-open')">☰</button><div><h1>${htmlEscape(title)}</h1><p>${htmlEscape(dateText)}</p></div></div><div class="top-actions">${actions}${themeToggle}<div class="user-pill"><span class="avatar">${htmlEscape(initials(user.name).slice(0, 1))}</span><div><strong>${htmlEscape(user.name)}</strong><small>${user.must_change_password ? 'Trocar senha' : 'Administrador'}</small></div></div></div></header>` : ''}<section class="content">${protectedContent}</section></main><script src="/app.js?v=191"></script></body></html>`;
 }
 
 function studentForm(s = {}, plans = [], action = '/alunos', title = 'Novo aluno') {
@@ -420,7 +454,7 @@ function portalLayout(title, content, g, student = null) {
   const pwaHead = student || title === 'Entrar' ? '<link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/icons/super-treino-apple-180.png"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="default">' : '';
   const installButton = student ? '<button type="button" class="btn secondary small portal-install" data-install-app hidden>Instalar app</button>' : '';
   const firstPaint = `<script>(function(){try{var t=localStorage.getItem('super-treino-theme');document.documentElement.setAttribute('data-theme',t==='dark'?'dark':'light')}catch(e){}})();</script>`;
-  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#12231d"><title>${htmlEscape(title)} · ${htmlEscape(g.gym_name)}</title>${firstPaint}${pwaHead}<link rel="stylesheet" href="/style.css?v=190"></head><body class="student-app"><div class="portal-container"><header class="portal-top"><a href="${student ? '/app' : '/app/entrar'}" class="portal-brand"><span class="portal-logo">ST</span><span><strong>${htmlEscape(g.gym_name)}</strong><small>Seu espaço de treinos</small></span></a><div class="portal-top-actions">${installButton}${toggle}${student ? `<form method="post" action="/app/sair"><input type="hidden" name="csrf_token" value="${attr(student.csrf_token)}"><button class="btn secondary small" type="submit">Sair</button></form>` : `<a class="btn secondary small" href="/login">Sou professor</a>`}</div></header>${student ? `<nav class="portal-primary-nav" aria-label="Navegação do aluno"><a href="/app" class="${title==='Meus treinos'?'active':''}" ${title==='Meus treinos'?'aria-current="page"':''}><span>🏋️</span> Treinos</a><a href="/app/historico" class="${title==='Meu histórico'?'active':''}" ${title==='Meu histórico'?'aria-current="page"':''}><span>📅</span> Histórico</a><a href="/app/mensalidade" class="${title==='Minha mensalidade'?'active':''}" ${title==='Minha mensalidade'?'aria-current="page"':''}><span>💳</span> Mensalidade</a></nav>` : ''}<main class="portal-main">${content}</main><footer class="portal-footer">Ficha orientativa: peça ajuda ao seu professor para adaptar execução ou carga.<small class="portal-version">Versão 1.9.0</small></footer></div><script src="/app.js?v=190"></script></body></html>`;
+  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#12231d"><title>${htmlEscape(title)} · ${htmlEscape(g.gym_name)}</title>${firstPaint}${pwaHead}<link rel="stylesheet" href="/style.css?v=191"></head><body class="student-app"><div class="portal-container"><header class="portal-top"><a href="${student ? '/app' : '/app/entrar'}" class="portal-brand"><span class="portal-logo">ST</span><span><strong>${htmlEscape(g.gym_name)}</strong><small>Seu espaço de treinos</small></span></a><div class="portal-top-actions">${installButton}${toggle}${student ? `<form method="post" action="/app/sair"><input type="hidden" name="csrf_token" value="${attr(student.csrf_token)}"><button class="btn secondary small" type="submit">Sair</button></form>` : `<a class="btn secondary small" href="/login">Sou professor</a>`}</div></header>${student ? `<nav class="portal-primary-nav" aria-label="Navegação do aluno"><a href="/app" class="${title==='Meus treinos'?'active':''}" ${title==='Meus treinos'?'aria-current="page"':''}><span>🏋️</span> Treinos</a><a href="/app/historico" class="${title==='Meu histórico'?'active':''}" ${title==='Meu histórico'?'aria-current="page"':''}><span>📅</span> Histórico</a><a href="/app/mensalidade" class="${title==='Minha mensalidade'?'active':''}" ${title==='Minha mensalidade'?'aria-current="page"':''}><span>💳</span> Mensalidade</a></nav>` : ''}<main class="portal-main">${content}</main><footer class="portal-footer">Ficha orientativa: peça ajuda ao seu professor para adaptar execução ou carga.<small class="portal-version">Versão 1.9.1</small></footer></div><script src="/app.js?v=191"></script></body></html>`;
 }
 function exerciseDemoMarkup(name) {
   const guide = exercisePresentation(name);
@@ -684,6 +718,68 @@ route('GET', '/alunos', async (request, env) => {
   const totalStudents = Number((await dbGet(env.DB, "SELECT COUNT(*) c FROM students WHERE status!='archived'"))?.c || 0);
   const content = `${flashFrom(url)}<div class="toolbar"><form class="search" action="/alunos"><span>⌕</span><input name="q" placeholder="Buscar nome, telefone, CEP, rua ou cidade" value="${attr(q)}"><button>Buscar</button></form><a class="btn primary" href="/alunos/novo">+ Cadastrar aluno</a></div><div class="filters"><a class="${f === 'all' ? 'selected' : ''}" href="/alunos">Todos <b>${totalStudents}</b></a><a class="${f === 'active' ? 'selected' : ''}" href="/alunos?status=active">Ativos</a><a class="${f === 'good' ? 'selected' : ''}" href="/alunos?status=good">🟢 Sem atraso</a><a class="${f === 'inactive' ? 'selected' : ''}" href="/alunos?status=inactive">Inativos</a><a class="${f === 'archived' ? 'selected' : ''}" href="/alunos?status=archived">Arquivados</a><a class="${f === 'birthday' ? 'selected' : ''}" href="/alunos?status=birthday">🎂 Aniversariantes</a></div><div class="panel table-panel"><div class="table-wrap"><table><thead><tr><th>Aluno</th><th>Plano</th><th>Mensalidade</th><th>Vencimento</th><th>Situação</th><th></th></tr></thead><tbody>${rows.map(s => `<tr><td><div class="person">${s.photo_data ? `<div class="person-avatar image"><img src="${attr(s.photo_data)}" alt=""></div>` : `<div class="person-avatar">${htmlEscape(initials(s.name))}</div>`}<div><strong>${htmlEscape(s.name)}</strong><small>${htmlEscape(s.phone)}${studentAddress(s) ? ` · ${htmlEscape([s.neighborhood, s.city].filter(Boolean).join(', ') || studentAddress(s))}` : ''}</small></div></div></td><td>${htmlEscape(s.plan_name || '—')}</td><td>${money(s.monthly_value)}</td><td>Dia ${s.due_day}</td><td>${badge(s.status === 'archived' ? 'Arquivado' : s.status !== 'active' ? 'Inativo' : Number(s.overdue_count) > 0 ? 'Vencido' : (s.invoice_raw ? invoiceStatus({ status: s.invoice_raw, due_date: s.due_date }) : 'Em dia'))}</td><td><a class="table-link" href="/alunos/${s.id}">Abrir ficha →</a></td></tr>`).join('') || '<tr><td colspan="6" class="empty">Nenhum aluno encontrado.</td></tr>'}</tbody></table></div></div>`;
   return htmlResponse(layout('Alunos', content, 'students', user, '', g));
+});
+route('GET', '/alunos/duplicados', async (request, env) => {
+  const user = await currentUser(request, env); if (!user) return redirect('/login');
+  await ensureCurrentInvoices(env);
+  const g = await gym(env), url = new URL(request.url);
+  const students = await dbAll(env.DB, `SELECT s.id,s.name,s.phone,s.status,s.birth_date,s.start_date,
+    (SELECT COUNT(*) FROM invoices i WHERE i.student_id=s.id AND i.status='paid') paid_count,
+    (SELECT COALESCE(SUM(i.amount),0) FROM invoices i WHERE i.student_id=s.id AND i.status='paid') paid_total
+    FROM students s ORDER BY s.id`);
+  const pairs = duplicatePairs(students);
+  const rows = pairs.map(({a,b,reasons}) => `<tr><td><a class="person-link" href="/alunos/${a.id}"><strong>${htmlEscape(a.name)}</strong><small>#${a.id} · ${htmlEscape(a.phone)} · ${htmlEscape(a.status)}</small></a></td><td><a class="person-link" href="/alunos/${b.id}"><strong>${htmlEscape(b.name)}</strong><small>#${b.id} · ${htmlEscape(b.phone)} · ${htmlEscape(b.status)}</small></a></td><td>${htmlEscape(reasons.join(' + '))}</td><td>${a.paid_count} / ${b.paid_count} · ${money(a.paid_total)} / ${money(b.paid_total)}</td><td><a class="btn secondary small" href="/alunos/duplicados/comparar?manter=${a.id}&excluir=${b.id}">Comparar →</a></td></tr>`).join('');
+  const content = `${flashFrom(url)}<section class="panel duplicate-intro"><span class="eyebrow">REVISÃO DE CADASTROS</span><h2>Possíveis alunos duplicados</h2><p>Encontramos pares com o mesmo telefone ou nome completo após normalização. Parentes podem compartilhar telefone e pessoas diferentes podem ter o mesmo nome; confira as fichas e os pagamentos antes de decidir.</p><strong>${pairs.length} par(es) para revisar</strong></section><div class="panel table-panel"><div class="table-wrap"><table><thead><tr><th>Primeiro cadastro</th><th>Segundo cadastro</th><th>Motivo</th><th>Pagamentos (primeiro / segundo)</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty">Nenhum par encontrado pelos critérios atuais.</td></tr>'}</tbody></table></div></div>`;
+  return htmlResponse(layout('Duplicados', content, 'duplicates', user, '<a class="btn secondary" href="/alunos">Ver alunos</a>', g));
+});
+route('GET', '/alunos/duplicados/comparar', async (request, env) => {
+  const user = await currentUser(request, env); if (!user) return redirect('/login');
+  await ensureCurrentInvoices(env);
+  const url = new URL(request.url), keepId = Number(url.searchParams.get('manter')), removeId = Number(url.searchParams.get('excluir'));
+  const review = await duplicateReview(env, keepId, removeId), g = await gym(env);
+  if (!review) return htmlResponse(layout('Par não encontrado', '<div class="empty">Este par não existe ou já não corresponde aos critérios de duplicidade. <a href="/alunos/duplicados">Voltar à lista</a>.</div>', 'duplicates', user, '', g), 404);
+  const {keep,remove,reasons,keepInvoices,removeInvoices,activity,plan,fingerprint} = review;
+  const removedPaid = removeInvoices.filter(i => i.status === 'paid');
+  const removedPaidTotal = removedPaid.reduce((sum, i) => sum + Number(i.amount), 0);
+  const movedPaid = plan.move.filter(i => i.status === 'paid');
+  const movedTotal = movedPaid.reduce((sum, i) => sum + Number(i.amount), 0);
+  const conflictText = plan.conflicts.length ? `<p class="alert danger-box">Há ${plan.conflicts.length} mês(es) com pagamento marcado nos dois cadastros: ${htmlEscape(plan.conflicts.map(c => c.removed.reference_month).join(', '))}. Não é possível transferir automaticamente dois recibos do mesmo mês. Confira qual é real; para manter ambos, resolva o mês manualmente antes.</p>` : '';
+  const content = `<p><a href="/alunos/duplicados">← Voltar aos possíveis duplicados</a></p><section class="panel duplicate-intro"><span class="eyebrow">CONFERÊNCIA OBRIGATÓRIA</span><h2>${htmlEscape(reasons.join(' e '))}</h2><p>Esta comparação não confirma que se trata da mesma pessoa. Confira nome, telefone, data de nascimento, ficha e cada recibo. Arquivar não remove pagamentos; a ação abaixo remove definitivamente o cadastro escolhido do banco ativo.</p><a class="btn secondary small" href="/alunos/duplicados/comparar?manter=${remove.id}&excluir=${keep.id}">Inverter quem permanece ↔</a></section><div class="duplicate-compare">${duplicateStudentCard(keep,keepInvoices,activity.find(a => Number(a.id) === Number(keep.id)),'FICA')}${duplicateStudentCard(remove,removeInvoices,activity.find(a => Number(a.id) === Number(remove.id)),'SERÁ EXCLUÍDO')}</div><section class="panel duplicate-decision"><span class="eyebrow">DECISÃO SOBRE AS MENSALIDADES</span><h2>O que acontece com os pagamentos?</h2><p>O cadastro #${remove.id} tem <strong>${removedPaid.length} pagamento(s), ${money(removedPaidTotal)}</strong>. A exclusão também remove acesso ao app e histórico de treinos desse cadastro.</p>${conflictText}<form method="post" action="/alunos/duplicados/excluir" data-confirm="Excluir definitivamente o cadastro #${remove.id} de ${attr(remove.name)}? Confira se o cadastro #${keep.id} é o correto e se a opção de mensalidades escolhida está certa."><input type="hidden" name="keep_id" value="${keep.id}"><input type="hidden" name="delete_id" value="${remove.id}"><input type="hidden" name="fingerprint" value="${fingerprint}"><fieldset><legend>Escolha uma opção</legend><label class="duplicate-option"><input type="radio" name="mode" value="preserve" required ${plan.conflicts.length ? 'disabled' : ''}><span><strong>Preservar pagamentos e mensalidades válidas</strong><small>${plan.move.length} mensalidade(s) passam para #${keep.id}, incluindo ${movedPaid.length} paga(s) (${money(movedTotal)}). Pagamentos substituem lançamentos abertos/cancelados do mesmo mês. ${plan.discard.length} lançamento(s) redundante(s) serão removidos.${plan.conflicts.length ? ' Resolva primeiro os dois pagos do mesmo mês.' : ''}</small></span></label><label class="duplicate-option"><input type="radio" name="mode" value="discard" required><span><strong>Excluir todas as mensalidades do cadastro duplicado</strong><small>${removeInvoices.length} lançamento(s) serão removidos, incluindo ${removedPaid.length} pago(s) (${money(removedPaidTotal)}). Nenhum pagamento desse cadastro será transferido.</small></span></label></fieldset><label class="duplicate-ack"><input type="checkbox" name="ack_finance" value="1" required> Conferi as fichas, os recibos e tenho um backup do banco antes de excluir.</label><label>Motivo da exclusão<input name="reason" minlength="4" maxlength="180" required placeholder="Ex.: cadastro repetido; pagamentos de teste"></label><label>Para confirmar, digite <strong>EXCLUIR ${remove.id}</strong><input name="confirm_text" autocomplete="off" required></label><button class="btn danger" type="submit">Excluir definitivamente o cadastro #${remove.id}</button></form></section>`;
+  return htmlResponse(layout('Conferir duplicados', content, 'duplicates', user, '', g));
+});
+route('POST', '/alunos/duplicados/excluir', async (request, env) => {
+  const user = await currentUser(request, env); if (!user) return redirect('/login');
+  const p = await bodyParams(request), keepId = Number(p.get('keep_id')), removeId = Number(p.get('delete_id'));
+  const review = await duplicateReview(env, keepId, removeId);
+  if (!review) return htmlResponse('Par inválido ou aluno já excluído. Atualize a lista.', 409);
+  const mode = String(p.get('mode') || ''), reason = String(p.get('reason') || '').trim();
+  if (!['discard','preserve'].includes(mode) || reason.length < 4 || reason.length > 180 || p.get('ack_finance') !== '1' || String(p.get('confirm_text') || '').trim() !== `EXCLUIR ${removeId}`) return htmlResponse('Confirmação incompleta. Volte à comparação e confira a opção escolhida.', 400);
+  if (!/^[0-9a-f]{64}$/.test(String(p.get('fingerprint') || '')) || !safeEqualString(p.get('fingerprint'),review.fingerprint)) return htmlResponse('Os dados mudaram desde a comparação. Atualize a página e confira novamente os pagamentos.', 409);
+  const {plan,removeInvoices,keep,remove} = review;
+  if (mode === 'preserve' && plan.conflicts.length) return htmlResponse('Há dois pagamentos no mesmo mês. Confira e resolva esse conflito antes de transferir.', 409);
+  const movedIds = mode === 'preserve' ? plan.move.map(i => Number(i.id)) : [];
+  const removedPaid = mode === 'discard' ? removeInvoices.filter(i => i.status === 'paid') : [];
+  const removedPaidTotal = removedPaid.reduce((sum, i) => sum + Number(i.amount), 0);
+  const statements = [];
+  if (mode === 'preserve') for (const old of plan.replace) {
+    statements.push(env.DB.prepare("DELETE FROM audit_log WHERE entity_type='mensalidade' AND entity_id=?").bind(old.id));
+    statements.push(env.DB.prepare('DELETE FROM invoices WHERE id=? AND student_id=?').bind(old.id,keepId));
+  }
+  if (mode === 'preserve') for (const invoice of plan.move) {
+    statements.push(env.DB.prepare('UPDATE invoices SET student_id=? WHERE id=? AND student_id=?').bind(keepId,invoice.id,removeId));
+  }
+  statements.push(env.DB.prepare("DELETE FROM audit_log WHERE entity_type='mensalidade' AND entity_id IN (SELECT id FROM invoices WHERE student_id=?)").bind(removeId));
+  statements.push(env.DB.prepare("DELETE FROM audit_log WHERE entity_type='aluno' AND entity_id=?").bind(removeId));
+  for (const table of ['student_exercise_sets','student_exercise_checks','student_workout_daily','student_workouts','student_portal_sessions','student_portal_accounts','invoices']) {
+    statements.push(env.DB.prepare(`DELETE FROM ${table} WHERE student_id=?`).bind(removeId));
+  }
+  statements.push(env.DB.prepare('DELETE FROM students WHERE id=?').bind(removeId));
+  statements.push(auditStatement(env,user,'aluno_duplicado_excluido','aluno',keepId,
+    `Cadastro duplicado #${removeId} excluído; cadastro #${keepId} preservado. Motivo: ${reason}`,
+    null,{deleted_student_id:removeId,kept_student_id:keepId,mode,moved_invoice_ids:movedIds,removed_paid_count:removedPaid.length,removed_paid_total:removedPaidTotal}));
+  try { await env.DB.batch(statements); }
+  catch (err) { console.error('duplicate deletion failed',err); return htmlResponse('Não foi possível concluir a operação. Nenhuma alteração parcial foi aplicada. Atualize a comparação e tente novamente.',409); }
+  return redirect(`/alunos/duplicados?ok=${encodeURIComponent(`Cadastro #${remove.id} excluído; #${keep.id} preservado. Confira o total das mensalidades.`)}`);
 });
 // V4.2 — busca autenticada de possíveis cadastros duplicados, somente leitura.
 route('GET', '/api/alunos/verificar-duplicidade', async (request, env) => {

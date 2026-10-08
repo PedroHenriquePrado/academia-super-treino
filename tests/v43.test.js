@@ -89,6 +89,122 @@ async function csrf(env,cookie,path='/seguranca'){
  return {token:match[1],html};
 }
 
+function addDuplicate(db, originalId, status='archived') {
+  return Number(db.prepare(`INSERT INTO students(name,phone,birth_date,start_date,plan_id,monthly_value,due_day,status)
+    SELECT name,phone,birth_date,start_date,plan_id,monthly_value,due_day,? FROM students WHERE id=?`).run(status,originalId).lastInsertRowid);
+}
+
+async function duplicateForm(env,cookie,keepId,removeId) {
+  const page=await req(env,`/alunos/duplicados/comparar?manter=${keepId}&excluir=${removeId}`,{cookie});
+  assert.equal(page.status,200);
+  const html=await page.text();
+  const fingerprint=html.match(/name="fingerprint" value="([a-f0-9]{64})"/);
+  const token=html.match(/name="csrf_token" value="([a-f0-9]+)"/);
+  assert.ok(fingerprint);assert.ok(token);
+  return {html,fields:{keep_id:String(keepId),delete_id:String(removeId),fingerprint:fingerprint[1],csrf_token:token[1],reason:'Cadastro duplicado confirmado',ack_finance:'1',confirm_text:`EXCLUIR ${removeId}`}};
+}
+
+test('duplicados lists normalized phone and name matches, including archived students, without automatically deleting anyone',async()=>{
+ const {env,db}=await fixture();
+ const cookie=await login(env);
+ const phoneCopy=addDuplicate(db,1);
+ db.prepare('UPDATE students SET name=?,phone=? WHERE id=?').run('Outro Sobrenome','(11) 9999-00001',phoneCopy);
+ const nameCopy=addDuplicate(db,2);
+ db.prepare('UPDATE students SET name=?,phone=? WHERE id=?').run('  ALUNO   2  ','11988880000',nameCopy);
+ assert.equal((await req(env,'/alunos/duplicados')).headers.get('location'),'/login');
+ const page=await req(env,'/alunos/duplicados',{cookie});
+ const html=await page.text();
+ assert.match(html,/Possíveis alunos duplicados/);
+ assert.match(html,/Mesmo telefone/);
+ assert.match(html,/Mesmo nome/);
+ assert.match(html,new RegExp(`manter=1&amp;excluir=${phoneCopy}|manter=1&excluir=${phoneCopy}`));
+ assert.match(html,new RegExp(`manter=2&amp;excluir=${nameCopy}|manter=2&excluir=${nameCopy}`));
+ assert.equal(db.prepare('SELECT COUNT(*) c FROM students').get().c,57);
+ const unrelated=await req(env,'/alunos/duplicados/comparar?manter=1&excluir=3',{cookie});
+ assert.equal(unrelated.status,404);
+});
+
+test('discarding a duplicate deletes its paid invoices, access and workout records, keeping the other student and audit summary',async()=>{
+ const {env,db}=await fixture();const cookie=await login(env);
+ const duplicate=addDuplicate(db,1);
+ db.prepare('INSERT INTO invoices(student_id,reference_month,due_date,amount,status,paid_at,receipt_number) VALUES(?,?,?,?,?,?,?)')
+  .run(duplicate,ref,`${ref}-23`,90,'paid',`${ref}-16T12:00:00`,'DUP-REC-1');
+ db.prepare('INSERT INTO student_workouts(student_id,template_id,assigned_at) VALUES(?,?,?)').run(duplicate,1,`${ref}-01`);
+ db.prepare('INSERT INTO student_portal_accounts(student_id,password_hash) VALUES(?,?)').run(duplicate,'test-only');
+ db.prepare('INSERT INTO student_exercise_checks(student_id,item_id,day) VALUES(?,?,?)').run(duplicate,1,`${ref}-12`);
+ db.prepare('INSERT INTO student_exercise_sets(student_id,item_id,day,set_number,exercise_name,workout_label,completed_at) VALUES(?,?,?,?,?,?,?)')
+  .run(duplicate,1,`${ref}-12`,1,'Supino','Treino A',`${ref}-12T12:00:00`);
+ db.prepare('INSERT INTO student_workout_daily(student_id,workout_assignment_id,day,workout_label,template_name,total_exercises,completed_exercises,updated_at) VALUES(?,?,?,?,?,?,?,?)')
+  .run(duplicate,1,`${ref}-12`,'Treino A','Teste',1,1,`${ref}-12T12:00:00`);
+ const {html,fields}=await duplicateForm(env,cookie,1,duplicate);
+ assert.match(html,/DUP-REC-1/);assert.match(html,/Excluir todas as mensalidades/);
+ const path='/alunos/duplicados/excluir';
+ assert.equal((await req(env,path,{method:'POST',cookie,form:{...fields,mode:'discard',csrf_token:''}})).status,403);
+ assert.equal((await req(env,path,{method:'POST',cookie,form:{...fields,mode:'discard',confirm_text:'EXCLUIR 1'}})).status,400);
+ const result=await req(env,path,{method:'POST',cookie,form:{...fields,mode:'discard'}});
+ assert.equal(result.status,302);
+ assert.equal(db.prepare('SELECT COUNT(*) c FROM students WHERE id=?').get(duplicate).c,0);
+ for(const table of ['invoices','student_workouts','student_portal_accounts','student_exercise_checks','student_exercise_sets','student_workout_daily'])
+   assert.equal(db.prepare(`SELECT COUNT(*) c FROM ${table} WHERE student_id=?`).get(duplicate).c,0,table);
+ assert.equal(db.prepare('SELECT COUNT(*) c FROM students WHERE id=1').get().c,1);
+ assert.equal(db.prepare("SELECT COUNT(*) c FROM invoices WHERE student_id=1 AND status='paid'").get().c,1);
+ assert.equal(db.prepare("SELECT COUNT(*) c FROM audit_log WHERE action='aluno_duplicado_excluido' AND entity_id=1").get().c,1);
+ assert.equal(db.prepare('PRAGMA foreign_key_check').all().length,0);
+});
+
+test('preserve mode moves unique paid invoices and replaces an open invoice; stale comparison never deletes',async()=>{
+ const {env,db}=await fixture();const cookie=await login(env);
+ const duplicate=addDuplicate(db,30);
+ const previous=ref.endsWith('-01')?`${Number(ref.slice(0,4))-1}-12`:`${ref.slice(0,4)}-${String(Number(ref.slice(5))-1).padStart(2,'0')}`;
+ db.prepare('INSERT INTO invoices(student_id,reference_month,due_date,amount,status,paid_at,receipt_number) VALUES(?,?,?,?,?,?,?)')
+  .run(duplicate,ref,`${ref}-23`,105,'paid',`${ref}-14T12:00:00`,'REAL-ATUAL');
+ db.prepare('INSERT INTO invoices(student_id,reference_month,due_date,amount,status,paid_at,receipt_number) VALUES(?,?,?,?,?,?,?)')
+  .run(duplicate,previous,`${previous}-23`,75,'paid',`${ref}-14T12:00:00`,'REAL-ANTERIOR');
+ const before=await duplicateForm(env,cookie,30,duplicate);
+ assert.match(before.html,/Preservar pagamentos e mensalidades/);
+ db.prepare('UPDATE invoices SET amount=95 WHERE student_id=30 AND reference_month=?').run(ref);
+ const path='/alunos/duplicados/excluir';
+ assert.equal((await req(env,path,{method:'POST',cookie,form:{...before.fields,mode:'preserve'}})).status,409);
+ assert.equal(db.prepare('SELECT COUNT(*) c FROM students WHERE id=?').get(duplicate).c,1);
+ const refreshed=await duplicateForm(env,cookie,30,duplicate);
+ assert.equal((await req(env,path,{method:'POST',cookie,form:{...refreshed.fields,mode:'preserve'}})).status,302);
+ assert.equal(db.prepare('SELECT COUNT(*) c FROM students WHERE id=?').get(duplicate).c,0);
+ const paid=db.prepare("SELECT receipt_number FROM invoices WHERE student_id=30 AND status='paid' ORDER BY reference_month").all();
+ assert.deepEqual(paid.map(i=>i.receipt_number),['REAL-ANTERIOR','REAL-ATUAL']);
+ assert.equal(db.prepare('SELECT COUNT(*) c FROM invoices WHERE student_id=30 AND reference_month=?').get(ref).c,1);
+ assert.equal((await req(env,`/recibos/${db.prepare("SELECT id FROM invoices WHERE receipt_number='REAL-ATUAL'").get().id}`,{cookie})).status,200);
+ assert.equal(db.prepare('PRAGMA foreign_key_check').all().length,0);
+});
+
+test('two paid invoices for the same reference month block preserve mode; no rows change',async()=>{
+ const {env,db}=await fixture();const cookie=await login(env);
+ const duplicate=addDuplicate(db,1);
+ db.prepare('INSERT INTO invoices(student_id,reference_month,due_date,amount,status,paid_at,receipt_number) VALUES(?,?,?,?,?,?,?)')
+  .run(duplicate,ref,`${ref}-23`,90,'paid',`${ref}-12T12:00:00`,'DUP-REC-2');
+ const {html,fields}=await duplicateForm(env,cookie,1,duplicate);
+ assert.match(html,/dois cadastros/);
+ assert.match(html,/value="preserve" required disabled/);
+ assert.equal((await req(env,'/alunos/duplicados/excluir',{method:'POST',cookie,form:{...fields,mode:'preserve'}})).status,409);
+ assert.equal(db.prepare('SELECT COUNT(*) c FROM students WHERE id=?').get(duplicate).c,1);
+ assert.equal(db.prepare("SELECT COUNT(*) c FROM invoices WHERE status='paid'").get().c,26);
+});
+
+test('an error during the final deletion rolls back invoices and student data together',async()=>{
+ const {env,db}=await fixture();const cookie=await login(env);
+ const duplicate=addDuplicate(db,1);
+ db.prepare('INSERT INTO invoices(student_id,reference_month,due_date,amount,status,paid_at,receipt_number) VALUES(?,?,?,?,?,?,?)')
+  .run(duplicate,ref,`${ref}-23`,90,'paid',`${ref}-11T12:00:00`,'ROLLBACK-REC');
+ const {fields}=await duplicateForm(env,cookie,1,duplicate);
+ db.exec(`CREATE TRIGGER abort_student_delete BEFORE DELETE ON students BEGIN SELECT RAISE(ABORT,'simulated failure'); END;`);
+ const oldError=console.error;let result;
+ try { console.error=()=>{};result=await req(env,'/alunos/duplicados/excluir',{method:'POST',cookie,form:{...fields,mode:'discard'}}); }
+ finally { console.error=oldError; }
+ assert.equal(result.status,409);
+ assert.equal(db.prepare('SELECT COUNT(*) c FROM students WHERE id=?').get(duplicate).c,1);
+ assert.equal(db.prepare("SELECT COUNT(*) c FROM invoices WHERE receipt_number='ROLLBACK-REC'").get().c,1);
+ assert.equal(db.prepare("SELECT COUNT(*) c FROM audit_log WHERE action='aluno_duplicado_excluido'").get().c,0);
+});
+
 test('migration on existing 55 students preserves all old invoices and paid receipts', async()=>{
  const {db,before}=await fixture();
  assert.deepEqual(before,{students:55,paid:25});
